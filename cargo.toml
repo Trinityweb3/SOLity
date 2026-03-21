@@ -1,0 +1,13 @@
+[package]
+name = "SOLity"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+dotenv = "0.15.0"
+solana-client = "2.1"
+solana-sdk = "2.1"
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres", "macros", "uuid", "chrono", "sqlite"] }
+teloxide = { version = "0.17.0", features = ["macros"] }
+tokio = { version = "1.50.0", features = ["full"] }
