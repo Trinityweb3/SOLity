@@ -1,10 +1,10 @@
-# 🦀 SOLity
+# SOLity
 
 A high-performance Solana helper bot built with **Rust**. It allows users to manage multiple wallets, check balances (SOL & SPL Tokens), and send transactions with real-time simulation and dynamic priority fees.
 
 ---
 
-## ✨ Key Features
+## Key Features
 
 - **Wallet Management**: Securely link and organize multiple Solana private keys via Telegram.
 - **Transfers**:
@@ -19,7 +19,7 @@ A high-performance Solana helper bot built with **Rust**. It allows users to man
 
 ---
 
-## 🛠 Tech Stack
+## Tech Stack
 
 *   **Framework**: [Teloxide](https://github.com) (Async Telegram Bot API)
 *   **Blockchain**: [Solana SDK](https://github.com) & `solana-client`
@@ -28,7 +28,7 @@ A high-performance Solana helper bot built with **Rust**. It allows users to man
 
 ---
 
-## 🚀 Installation & Setup
+# Installation & Setup
 
 ### 2. Environment Variables
 Create a `.env` file in the project root:
@@ -42,13 +42,6 @@ RPC_URL=https://api.mainnet-beta.solana.com (or custom)
 ```bash
 cargo run --release
 ```
-
-## ⚙️ How it Works
-**Automated Transaction Safety**
-- The bot uses **simulate_transaction** before sending. It ensures the recipient address is valid and calculates the exact units_consumed to avoid overpaying or failing
-
-**Token & Price Discovery** (under development on 29 march)
-- The bot iterates through all Associated Token Accounts (ATAs) across both standard and 2022 programs, identifying non-zero balances and preparing them for reporting
 
 ## Contacts
 **Created by [@trinitycult](https://t.me)**
