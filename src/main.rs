@@ -1,4 +1,6 @@
 mod sol_transfer;
+mod balances;
+use balances::get_all_balance;
 use std::sync::Arc;
 use sqlx::Row;
 use anyhow::Error;
@@ -9,6 +11,13 @@ use teloxide::utils::command::BotCommands;
 use teloxide::prelude::*;
 
 use sqlx::sqlite::SqlitePool;
+
+
+pub enum State {
+    
+}
+
+
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Available commands:")]
@@ -86,22 +95,26 @@ async fn answer(bot: Bot, msg: Message, cmd: Commands, pool: Arc<Pool<Sqlite>>) 
             bot.send_message(msg.chat.id, format!("<b>Hey!</b>\nI'm the your personal solana helper\n<b>Available commands:</b>\n/start\n/add_a_wallet\n/send_sol\n/my_wallets\n\nThe code's fully open-source and available on the GitHub. Follow the link -  https://github.com/Trinityweb3/helper_bot\n<b>Created by @trinitycult</b>")).parse_mode(ParseMode::Html).await?;
         },
         Commands::My_Wallets => {
-            let private_key_rows = sqlx::query("
+            let private_key_rows = match sqlx::query("
                     SELECT private_key FROM wallets WHERE user_id = ?"
-                )
-                .bind(msg.chat.id.0)
-                .fetch_all(&*pool)
-                .await
-                .unwrap();
+                ).bind(msg.chat.id.0).fetch_all(&*pool).await {
+                Ok(token) => { 
+                    token
+                }
+                Err(_)=> vec![]
+            };
+
             bot.send_message(msg.chat.id, "<b>Your private keys</b> 👇").await?;
             for row in private_key_rows {
                 let private_key: String = row.get("private_key");
                 bot.send_message(msg.chat.id, format!("<code>{}</code>", private_key)).parse_mode(ParseMode::Html).await?;
             }
         },
+
         Commands::Add_a_wallet => {
             bot.send_message(msg.chat.id, ADD_A_WALLET_MESSAGE).await?;
         },
+        
         Commands::Send_sol => {
             bot.send_message(msg.chat.id, "Ok\n\n<b>Enter the private key from which you'll send $SOL</b> (You can look added keys by the /my_wallets)\n<b>Enter the sol address where you wanna send $SOL</b>\n<b>Enter the $SOL amount</b>\n\nFollow the format: <b>private_key sol_address SOL_amount</b>").parse_mode(ParseMode::Html).await?;
         }
