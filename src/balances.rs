@@ -1,5 +1,5 @@
 use core::f64;
-use std::{collections::HashMap, fmt::format, str::FromStr};
+use std::{collections::HashMap, str::FromStr};
 use anyhow::Result;
 use serde::Deserialize;
 
@@ -8,7 +8,37 @@ use solana_sdk::{
     pubkey::Pubkey
 };
 
-pub async fn get_all_balance(client: RpcClient, owner_pubkey: Pubkey) -> Result<HashMap<String, f64>> {
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomJson {
+    price_usd: String, 
+    base_token: BaseToken,
+    liquidity: Liquidity,
+    market_cap: f64,
+}
+
+#[derive(Deserialize, Debug)]
+struct Liquidity {
+    usd: f64,
+    base: i64,
+    quote: f64
+}
+
+#[derive(Deserialize, Debug)]
+struct BaseToken {
+    address: String,
+    name: String,
+    symbol: String
+}
+
+struct TokenInfo {
+    ticker: String,
+    price: f64,
+    mcap: f64,
+    liquidity: f64
+}
+
+pub async fn get_all_balance_and_return_hashmap(client: RpcClient, owner_pubkey: Pubkey) -> Result<HashMap<String, f64>> {
     let mut map: HashMap<String, f64> = HashMap::new();
     //. getting sol_balance
     let sol_balance: f64 = (client.get_balance(&owner_pubkey).await? as f64) / 1_000_000_000.0;
@@ -36,9 +66,19 @@ pub async fn get_all_balance(client: RpcClient, owner_pubkey: Pubkey) -> Result<
                     };
 
                     let api_response_for_mint_address: String = get_api_response(mint).await?;
-                    let vec_ticker_price_mcap_liquidity: Vec<String> = parse_api_response(&api_response_for_mint_address);
-                    let ticker: String = vec_ticker_price_mcap_liquidity[0].clone();
-                    let price: String = vec_ticker_price_mcap_liquidity[1].clone();
+                    let vec_ticker_price_mcap_liquidity: TokenInfo = parse_api_response(&api_response_for_mint_address);
+
+                    if vec_ticker_price_mcap_liquidity.ticker == "".to_string() {
+                        continue;
+                    };
+
+                    let ticker: String = vec_ticker_price_mcap_liquidity.ticker;
+                    
+                    if vec_ticker_price_mcap_liquidity.price == 0.0 {
+                        continue;
+                    };
+
+                    let price: f64 = vec_ticker_price_mcap_liquidity.price;
                     
                     let token_amount: f64 = match info["tokenAmount"]["uiAmount"].as_f64() {
                         Some(amount) if amount > 0.0 => amount,
@@ -47,7 +87,14 @@ pub async fn get_all_balance(client: RpcClient, owner_pubkey: Pubkey) -> Result<
 
                     let value_by_token: f64 = accounting_usdvalue_of_one_token(price, token_amount);
 
-                    map.insert(ticker, value_by_token);
+                    match map.get_mut(&ticker) {
+                        Some(value) => {
+                            *value = *value + value_by_token;
+                        }
+                        None => {
+                            map.insert(ticker, value_by_token);
+                        }
+                    }    
                 },
                 _ => continue,
             }
@@ -56,65 +103,65 @@ pub async fn get_all_balance(client: RpcClient, owner_pubkey: Pubkey) -> Result<
     return Ok(map);
 }
 
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CustomJson {
-    price_usd: String, 
-    base_token: BaseToken,
-    liquidity: Liquidity,
-    market_cap: f64,
-}
-
-#[derive(Deserialize, Debug)]
-struct Liquidity {
-    usd: f64,
-    base: i64,
-    quote: f64
-}
-
-#[derive(Deserialize, Debug)]
-struct BaseToken {
-    address: String,
-    name: String,
-    symbol: String
-}
-
-
 async fn get_api_response(mint: String) -> Result<String> {
     let path: String = format!("https://api.dexscreener.com/tokens/v1/solana/{}", mint);
-    let api_response: String = reqwest::Client::new()
+    let response: reqwest::Response = reqwest::Client::new()
         .get(path)
         .send()
-        .await?
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!("API Error"));
+    }
+    let api_response: String = response
         .text()
         .await?;
 
     return Ok(api_response);
 }
 
-fn parse_api_response(api_response: &str) -> Vec<String> {
-    let mut vec_ticker_price_mcap_liquidity: Vec<String> = Vec::new();
+fn parse_api_response(api_response: &str) -> TokenInfo {
+    let mut ticker_price_mcap_liquidity: TokenInfo = TokenInfo {
+        ticker: "".to_string(),
+        price: 0.0,
+        mcap: 0.0,
+        liquidity: 0.0
+    };
 
-    let raws: Vec<CustomJson> = serde_json::from_str(api_response).unwrap();
+    let raws: Vec<CustomJson> = match serde_json::from_str(api_response) {
+        Ok(r) => r,
+        Err(_) => return ticker_price_mcap_liquidity
+    };
     
-    let price: String = raws[0].price_usd.clone();
-    let token_name: String = raws[0].base_token.name.clone();
-    let liquidity: String = raws[0].liquidity.usd.clone().to_string();
+    if raws.is_empty() {
+        return ticker_price_mcap_liquidity;
+    }
+
     let token_symbol: String = raws[0].base_token.symbol.clone();
+    let token_name: String = raws[0].base_token.name.clone();
     let ticker: String = format!("{}({})", token_name, token_symbol);
-    let mcap: String = raws[0].market_cap.to_string();
 
-    vec_ticker_price_mcap_liquidity.push(ticker);
-    vec_ticker_price_mcap_liquidity.push(price);
-    vec_ticker_price_mcap_liquidity.push(mcap);
-    vec_ticker_price_mcap_liquidity.push(liquidity);
+    let price: f64= match raws[0].price_usd.clone().parse::<f64>() {
+        Ok(p ) => p,
+        Err(_) => 0.0
+    };
 
-    return vec_ticker_price_mcap_liquidity;
+    let mcap: f64= raws[0].market_cap;
+
+    let liquidity: f64 = raws[0].liquidity.usd.clone();
+
+    ticker_price_mcap_liquidity = TokenInfo { 
+        ticker: ticker, 
+        price: price, 
+        mcap: mcap, 
+        liquidity: liquidity 
+    };
+    
+
+    return ticker_price_mcap_liquidity;
 }
 
-fn accounting_usdvalue_of_one_token(price: String, amount: f64) -> f64 {
-    let price: f64 = price.parse::<f64>().unwrap();
+fn accounting_usdvalue_of_one_token(price: f64, amount: f64) -> f64 {
     let token_balance: f64 = amount * price;
 
     return token_balance
