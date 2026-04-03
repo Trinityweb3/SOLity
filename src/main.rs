@@ -1,123 +1,252 @@
-mod sol_transfer;
-mod balances;
-use balances::get_all_balance;
-use std::sync::Arc;
-use sqlx::Row;
-use anyhow::Error;
-use sqlx::{Pool, Sqlite};
-use teloxide::dispatching::dialogue::GetChatId;
-use teloxide::types::ParseMode;
-use teloxide::utils::command::BotCommands;
-use teloxide::prelude::*;
+use std::{env, sync::Arc};
 
+use anyhow::Result;
+use rand::{RngCore, rngs::OsRng};
+
+use teloxide::{
+    dispatching::{
+        dialogue::{Dialogue, InMemStorage},
+        UpdateHandler,
+    },
+    prelude::*,
+    utils::command::BotCommands,
+};
+
+use dptree::case;
+
+use sqlx::{Pool, Sqlite, Row};
 use sqlx::sqlite::SqlitePool;
 
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use aes_gcm::aead::Aead;
+use base64::{engine::general_purpose, Engine};
 
-pub enum State {
-    
+mod sol_transfer;
+
+#[derive(Clone, Default)]
+enum State {
+    #[default]
+    Start,
+    WaitingPrivateKey,
+    WaitingSend,
 }
 
-
+type MyDialogue = Dialogue<State, InMemStorage<State>>;
+type HandlerResult = Result<(), anyhow::Error>;
 
 #[derive(BotCommands, Clone)]
-#[command(rename_rule = "lowercase", description = "Available commands:")]
+#[command(rename_rule = "lowercase")]
 enum Commands {
-    #[command(description = "Start the bot")]
     Start,
-    #[command(description = "Send $SOL")]
-    Send_sol,
-    #[command(description = "Add a wallet")]
-    Add_a_wallet,
-    #[command(description = "Add a wallet")]
-    My_Wallets
+    Addwallet,
+    Sendsol,
+    Mywallets,
 }
 
-const UNKNOWN_COMMAND: &str = "Unknown command";
+fn get_key() -> [u8; 32] {
+    let key_str = env::var("SECRET_KEY").expect("SECRET_KEY required");
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&key_str.as_bytes()[0..32]);
+    key
+}
 
-const ADD_A_WALLET_MESSAGE: &str = "Ok. Please enter a your private key (87-88 characters)";
+fn encrypt(data: &str) -> Option<String> {
+    let key = get_key();
+    let cipher = Aes256Gcm::new(&key.into());
 
-#[tokio::main]
-async fn main() -> Result<(), Error> {
-    dotenv::dotenv().ok();
-    let bot_token = std::env::var("BOT_TOKEN").unwrap();
-    let database_url = std::env::var("DATABASE_URL").unwrap();
-    let pool = SqlitePool::connect(&database_url).await?;
-    let pool = Arc::new(pool);
-    let bot: Bot = Bot::new(bot_token);
+    let mut nonce = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce);
 
-    teloxide::repl(bot, move |bot: Bot, msg: Message| {
-        let pool = Arc::clone(&pool);
-        async move {
+    let encrypted = match cipher.encrypt(Nonce::from_slice(&nonce), data.as_bytes()) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
 
-            match Commands::parse(msg.text().unwrap_or("/start"), "SOLity_tgbot") {
-                Ok(cmd) => {
-                    answer(bot, msg, cmd, pool).await?;
-                },
-                Err(_) => {
-                    let text: &str = msg.text().unwrap_or("/start");
-                    let parts: Vec<&str> = text.split_whitespace().collect();
-                    if parts.len() == 3 {
-                        let private_key: String = parts[0].to_string();
-                        let to_address: String = parts[1].to_string();
-                        let amount: String = parts[2].to_string();
+    let mut result = nonce.to_vec();
+    result.extend(encrypted);
 
-                        match sol_transfer::send_sol(private_key, to_address, amount, bot.clone(), msg.clone()).await {
-                            Ok(_) => {},
-                            Err(_) => {
-                                bot.send_message(msg.chat.id, "Rare error occure").await.ok();
-                            }
-                        };
-                        return respond(());
-                    }
+    Some(general_purpose::STANDARD.encode(result))
+}
 
-                    if text.len() >= 87 && text.len() < 89 {
-                        sqlx::query("INSERT INTO wallets (user_id, private_key) VALUES (?, ?)")
-                            .bind(msg.chat.id.0)
-                            .bind(text)
-                            .execute(&*pool)
-                            .await
-                            .ok();
-                        bot.send_message(msg.chat.id, format!("</b>Private key recieved</b>\nTry /my_wallets or add an another wallet /add_a_wallet")).parse_mode(ParseMode::Html).await?;
-                    } else {
-                        bot.send_message(msg.chat.id, UNKNOWN_COMMAND).await?;
-                    }
-                }
-            }
-            respond(())
+fn decrypt(data: &str) -> Option<String> {
+    let key = get_key();
+    let cipher = Aes256Gcm::new(&key.into());
+
+    let decoded = match general_purpose::STANDARD.decode(data) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+
+    let (nonce_bytes, cipher_bytes) = decoded.split_at(12);
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    let decrypted = match cipher.decrypt(nonce, cipher_bytes) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+
+    match String::from_utf8(decrypted) {
+        Ok(s) => Some(s),
+        Err(_) => None,
+    }
+}
+
+async fn handle_command(
+    bot: Bot,
+    msg: Message,
+    dialogue: MyDialogue,
+    cmd: Commands,
+) -> HandlerResult {
+    match cmd {
+        Commands::Start => {
+            bot.send_message(msg.chat.id, "Welcome").await?;
         }
-    }).await;
+
+        Commands::Addwallet => {
+            bot.send_message(msg.chat.id, "Send private key").await?;
+            dialogue.update(State::WaitingPrivateKey).await?;
+        }
+
+        Commands::Sendsol => {
+            bot.send_message(msg.chat.id, "Enter: address amount").await?;
+            dialogue.update(State::WaitingSend).await?;
+        }
+
+        Commands::Mywallets => {
+            bot.send_message(msg.chat.id, "Wallets stored in DB").await?;
+        }
+    }
+
     Ok(())
 }
 
-async fn answer(bot: Bot, msg: Message, cmd: Commands, pool: Arc<Pool<Sqlite>>) -> ResponseResult<()> {
-    match cmd {
-        Commands::Start => {
-            bot.send_message(msg.chat.id, format!("<b>Hey!</b>\nI'm the your personal solana helper\n<b>Available commands:</b>\n/start\n/add_a_wallet\n/send_sol\n/my_wallets\n\nThe code's fully open-source and available on the GitHub. Follow the link -  https://github.com/Trinityweb3/helper_bot\n<b>Created by @trinitycult</b>")).parse_mode(ParseMode::Html).await?;
-        },
-        Commands::My_Wallets => {
-            let private_key_rows = match sqlx::query("
-                    SELECT private_key FROM wallets WHERE user_id = ?"
-                ).bind(msg.chat.id.0).fetch_all(&*pool).await {
-                Ok(token) => { 
-                    token
-                }
-                Err(_)=> vec![]
-            };
+async fn handle_private_key(
+    bot: Bot,
+    msg: Message,
+    dialogue: MyDialogue,
+    pool: Arc<Pool<Sqlite>>,
+) -> HandlerResult {
 
-            bot.send_message(msg.chat.id, "<b>Your private keys</b> 👇").await?;
-            for row in private_key_rows {
-                let private_key: String = row.get("private_key");
-                bot.send_message(msg.chat.id, format!("<code>{}</code>", private_key)).parse_mode(ParseMode::Html).await?;
-            }
-        },
+    let text = match msg.text() {
+        Some(t) => t,
+        None => return Ok(()),
+    };
 
-        Commands::Add_a_wallet => {
-            bot.send_message(msg.chat.id, ADD_A_WALLET_MESSAGE).await?;
-        },
-        
-        Commands::Send_sol => {
-            bot.send_message(msg.chat.id, "Ok\n\n<b>Enter the private key from which you'll send $SOL</b> (You can look added keys by the /my_wallets)\n<b>Enter the sol address where you wanna send $SOL</b>\n<b>Enter the $SOL amount</b>\n\nFollow the format: <b>private_key sol_address SOL_amount</b>").parse_mode(ParseMode::Html).await?;
+    let encrypted = match encrypt(text) {
+        Some(v) => v,
+        None => return Ok(()),
+    };
+
+    sqlx::query("INSERT INTO wallets (user_id, private_key) VALUES (?, ?)")
+        .bind(msg.chat.id.0)
+        .bind(encrypted)
+        .execute(&*pool)
+        .await?;
+
+    bot.send_message(msg.chat.id, "Saved").await?;
+
+    dialogue.update(State::Start).await?;
+    Ok(())
+}
+
+async fn handle_send(
+    bot: Bot,
+    msg: Message,
+    dialogue: MyDialogue,
+    pool: Arc<Pool<Sqlite>>,
+) -> HandlerResult {
+
+    let text = match msg.text() {
+        Some(t) => t,
+        None => return Ok(()),
+    };
+
+    let parts: Vec<&str> = text.split_whitespace().collect();
+
+    if parts.len() != 2 {
+        bot.send_message(msg.chat.id, "Format: address amount. You have to have uploaded private key. Use /addwallet at first").await?;
+        return Ok(());
+    }
+
+    let to = parts[0].to_string();
+    let amount = parts[1].to_string();
+
+    let row = match sqlx::query(
+        "SELECT private_key FROM wallets WHERE user_id = ? LIMIT 1"
+    )
+    .bind(msg.chat.id.0)
+    .fetch_optional(&*pool)
+    .await?
+    {
+        Some(r) => r,
+        None => {
+            bot.send_message(msg.chat.id, "No wallet found").await?;
+            return Ok(());
+        }
+    };
+
+    let encrypted_key: String = row.get("private_key");
+
+    let private_key = match decrypt(&encrypted_key) {
+        Some(k) => k,
+        None => {
+            bot.send_message(msg.chat.id, "Decrypt error").await?;
+            return Ok(());
+        }
+    };
+
+    bot.send_message(msg.chat.id, "Sending...").await?;
+
+    match sol_transfer::send_sol(
+        private_key,
+        to,
+        amount,
+        bot.clone(),
+        msg.clone(),
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(_) => {
+            bot.send_message(msg.chat.id, "Transaction failed").await?;
         }
     }
+
+    dialogue.update(State::Start).await?;
+    Ok(())
+}
+
+fn schema() -> UpdateHandler<anyhow::Error> {
+    Update::filter_message()
+        .enter_dialogue::<Message, InMemStorage<State>, State>()
+        .branch(
+            dptree::entry()
+                .filter_command::<Commands>()
+                .endpoint(handle_command),
+        )
+        .branch(case![State::WaitingPrivateKey].endpoint(handle_private_key))
+        .branch(case![State::WaitingSend].endpoint(handle_send))
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    dotenv::dotenv().ok();
+    let token: String = std::env::var("BOT_TOKEN")?;
+
+    let bot: Bot = Bot::new(token);
+
+    let db = env::var("DATABASE_URL")?;
+    let pool = Arc::new(SqlitePool::connect(&db).await?);
+
+    Dispatcher::builder(bot, schema())
+        .dependencies(dptree::deps![
+            InMemStorage::<State>::new(),
+            pool
+        ])
+        .enable_ctrlc_handler()
+        .build()
+        .dispatch()
+        .await;
+
     Ok(())
 }
